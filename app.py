@@ -304,6 +304,16 @@ def main():
         st.info("For Streamlit Cloud deployment, add these as secrets in your app settings.")
         st.stop()
 
+    # Check if running on Streamlit Cloud (microphone limitations)
+    is_cloud_deployment = "streamlit.io" in st.get_option("server.baseUrlPath") if st.get_option(
+        "server.baseUrlPath") else False
+
+    if is_cloud_deployment:
+        st.warning(
+            "🌐 **Note**: This app is running on Streamlit Cloud. Microphone access may be limited due to browser security restrictions. For full voice functionality, run locally.")
+        st.info(
+            "💡 **Tip**: Clone this repository and run locally for complete microphone support: `streamlit run app.py`")
+
     # Header
     st.markdown("<h1 class='main-header'>Hume AI Voice Chat</h1>", unsafe_allow_html=True)
 
