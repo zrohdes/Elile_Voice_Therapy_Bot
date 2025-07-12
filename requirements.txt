@@ -1,4 +1,6 @@
 streamlit>=1.28.0
-hume>=0.9.1
+hume[microphone]>=0.9.1
+pyaudio
 httpx>=0.24.0
 requests>=2.28.0
+numpy
