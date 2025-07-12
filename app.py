@@ -7,10 +7,27 @@ import streamlit as st
 import threading
 import requests
 import re
+
+# Conditional imports for audio functionality
+try:
+    from hume import MicrophoneInterface, Stream
+    AUDIO_AVAILABLE = True
+except ImportError:
+    AUDIO_AVAILABLE = False
+    # Create dummy classes for cloud deployment
+    class MicrophoneInterface:
+        @staticmethod
+        async def start(*args, **kwargs):
+            raise NotImplementedError("Audio not available in cloud deployment")
+    
+    class Stream:
+        @staticmethod
+        def new():
+            return None
+
 from hume.client import AsyncHumeClient
 from hume.empathic_voice.chat.socket_client import ChatConnectOptions
 from hume.empathic_voice.chat.types import SubscribeEvent
-from hume import MicrophoneInterface, Stream
 
 # Disable SSL verification for corporate networks
 os.environ['PYTHONHTTPSVERIFY'] = '0'
@@ -46,21 +63,27 @@ def is_arabic(text):
     return total_chars > 0 and arabic_chars / total_chars > 0.3
 
 class StreamlitWebSocketHandler:
-    def __init__(self, input_language='auto'):
-        self.byte_strs = Stream.new()
+    def __init__(self, input_language='auto', audio_mode=True):
+        self.byte_strs = Stream.new() if AUDIO_AVAILABLE and audio_mode else None
         self.chat_history = []
         self.is_connected = False
         self.input_language = input_language
+        self.audio_mode = audio_mode and AUDIO_AVAILABLE
 
     def set_input_language(self, language):
         self.input_language = language
 
     async def on_open(self):
         self.is_connected = True
+        if self.audio_mode:
+            message = "Connection established. You can start speaking now."
+        else:
+            message = "Connection established. Running in text-only mode - audio input not available."
+        
         self.chat_history.append({
             "timestamp": datetime.datetime.now(tz=datetime.timezone.utc),
             "type": "system",
-            "message": "Connection established. You can start speaking now."
+            "message": message
         })
 
     async def on_message(self, message: SubscribeEvent):
@@ -102,7 +125,7 @@ class StreamlitWebSocketHandler:
                 "emotions": emotions
             })
             
-        elif message.type == "audio_output":
+        elif message.type == "audio_output" and self.byte_strs:
             await self.byte_strs.put(base64.b64decode(message.data.encode("utf-8")))
             
         elif message.type == "error":
@@ -148,28 +171,30 @@ async def run_voice_chat(handler, api_key, secret_key, config_id):
                 on_close=handler.on_close,
                 on_error=handler.on_error
         ) as socket:
-            try:
-                # Try to start microphone interface
-                await asyncio.create_task(
-                    MicrophoneInterface.start(socket, allow_user_interrupt=False, byte_stream=handler.byte_strs)
-                )
-            except Exception as audio_error:
-                # Handle audio device errors gracefully
-                error_msg = str(audio_error)
-                if "querying device" in error_msg or "No Default Input Device Available" in error_msg:
+            if handler.audio_mode and AUDIO_AVAILABLE:
+                try:
+                    # Try to start microphone interface
+                    await asyncio.create_task(
+                        MicrophoneInterface.start(socket, allow_user_interrupt=False, byte_stream=handler.byte_strs)
+                    )
+                except Exception as audio_error:
+                    # Handle audio device errors gracefully
+                    error_msg = str(audio_error)
                     handler.chat_history.append({
                         "timestamp": datetime.datetime.now(tz=datetime.timezone.utc),
                         "type": "error",
-                        "message": "Audio device not available. This is expected when running on cloud servers. Please run locally for voice input functionality."
+                        "message": f"Audio initialization failed: {error_msg}"
                     })
-                else:
-                    handler.chat_history.append({
-                        "timestamp": datetime.datetime.now(tz=datetime.timezone.utc),
-                        "type": "error",
-                        "message": f"Audio error: {error_msg}"
-                    })
-                # Keep connection alive even without microphone
-                await asyncio.sleep(1)  # Keep the connection open
+            else:
+                # Text-only mode - keep connection alive
+                handler.chat_history.append({
+                    "timestamp": datetime.datetime.now(tz=datetime.timezone.utc),
+                    "type": "system",
+                    "message": "Running in text-only mode. Audio input/output not available."
+                })
+                # Keep connection alive
+                while handler.is_connected:
+                    await asyncio.sleep(1)
                 
     except Exception as e:
         handler.chat_history.append({
@@ -316,32 +341,26 @@ def main():
         st.info("For Streamlit Cloud deployment, add these as secrets in your app settings.")
         st.stop()
     
-    # Check if running on Streamlit Cloud or in environment without audio devices
-    try:
-        import pyaudio
-        # Test if audio devices are available
-        audio = pyaudio.PyAudio()
-        device_count = audio.get_device_count()
-        audio.terminate()
-        
-        if device_count == 0:
-            st.warning("🎤 **No audio devices detected**. This app works best with microphone access. Running in demo mode.")
+    # Check audio availability and show appropriate messages
+    if not AUDIO_AVAILABLE:
+        st.info("🌐 **Cloud Mode**: Running without audio dependencies. This is optimized for Streamlit Cloud deployment.")
+    else:
+        # Check if audio devices are available
+        try:
+            import pyaudio
+            audio = pyaudio.PyAudio()
+            device_count = audio.get_device_count()
+            audio.terminate()
+            
+            if device_count == 0:
+                st.warning("🎤 **No audio devices detected**. Running in text-only mode.")
+                audio_available = False
+            else:
+                st.success("🎤 **Audio devices available**. Full voice functionality enabled.")
+                audio_available = True
+        except Exception:
+            st.info("🌐 **Text-only mode**: Audio system not available. Interface and translation features fully functional.")
             audio_available = False
-        else:
-            audio_available = True
-    except Exception as e:
-        st.warning("🎤 **Audio system not available**. This is normal on cloud deployments. For full voice functionality, run locally.")
-        audio_available = False
-    
-    # Additional cloud detection
-    is_cloud_deployment = (
-        "streamlit.io" in (st.get_option("server.baseUrlPath") or "") or
-        not audio_available or
-        os.getenv("STREAMLIT_SHARING_MODE") == "1"
-    )
-    
-    if is_cloud_deployment:
-        st.info("💡 **Running in Cloud Mode**: Interface and translation features available. Clone and run locally for voice input: `streamlit run app.py`")
 
     # Header
     st.markdown("<h1 class='main-header'>Hume AI Voice Chat</h1>", unsafe_allow_html=True)
@@ -381,9 +400,11 @@ def main():
                 st.session_state.websocket_handler.set_input_language(selected_language)
     
     with col3:
-        if st.button("Start Voice Chat", disabled=not credentials_available, use_container_width=True):
+        if st.button("Start Connection", disabled=not credentials_available, use_container_width=True):
+            audio_mode = AUDIO_AVAILABLE and 'audio_available' in locals() and audio_available
+            
             if 'websocket_handler' not in st.session_state:
-                st.session_state.websocket_handler = StreamlitWebSocketHandler(st.session_state.input_language)
+                st.session_state.websocket_handler = StreamlitWebSocketHandler(st.session_state.input_language, audio_mode)
             else:
                 st.session_state.websocket_handler.set_input_language(st.session_state.input_language)
             
@@ -394,7 +415,11 @@ def main():
                 )
                 st.session_state.chat_thread.daemon = True
                 st.session_state.chat_thread.start()
-                st.success("Voice chat started!")
+                
+                if audio_mode:
+                    st.success("Voice chat started!")
+                else:
+                    st.success("Text-only chat started!")
                 st.rerun()
     
     with col4:
